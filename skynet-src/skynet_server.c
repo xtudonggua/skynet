@@ -40,33 +40,33 @@
 
 #endif
 
-struct skynet_context {
-	void * instance;
-	struct skynet_module * mod;
-	void * cb_ud;
-	skynet_cb cb;
-	struct message_queue *queue;
-	FILE * logfile;
+struct skynet_context { //一个skynet服务ctx的结构
+	void * instance; //每个ctx自己的数据块，不同类型ctx有不同数据结构，相同类型ctx数据结构相同，但具体的数据不一样，由指定module的create函数返回
+	struct skynet_module * mod; //保存module的指针，方便之后调用create,init,signal,release
+	void * cb_ud; //给callback函数调用第二个参数，可以是NULL
+	skynet_cb cb; //消息回调函数指针，通常在module的init里设置
+	struct message_queue *queue; //ctx自己的消息队列指针
+	FILE * logfile; //日志句柄
 	uint64_t cpu_cost;	// in microsec
 	uint64_t cpu_start;	// in microsec
-	char result[32];
-	uint32_t handle;
-	int session_id;
-	int ref;
-	int message_count;
-	bool init;
-	bool endless;
-	bool profile;
+	char result[32]; //保存skynet_command操作后的结果
+	uint32_t handle; //标识唯一的ctx id
+	int session_id; //本方发出请求会设置一个对应的session，当收到对方消息返回时，通过session匹配是哪一个请求的返回
+	int ref; //引用计数，当为0，可以删除ctx
+	int message_count; //累计收到的消息数量
+	bool init; //标记是否完成初始化
+	bool endless; //标记消息是否堵住
+	bool profile; //标记是否需要开启性能检测
 
-	CHECKCALLING_DECL
+	CHECKCALLING_DECL // 自旋锁
 };
 
 struct skynet_node {
-	int total;
-	int init;
-	uint32_t monitor_exit;
-	pthread_key_t handle_key;
-	bool profile;	// default is off
+	int total; //ctx总量
+	int init; //标记是否初始化
+	uint32_t monitor_exit; //
+	pthread_key_t handle_key; //线程存储，保存当前工作线程正在处理的ctx的handle
+	bool profile;	// default is off 性能开关
 };
 
 static struct skynet_node G_NODE;
@@ -98,7 +98,7 @@ skynet_current_handle(void) {
 }
 
 static void
-id_to_hex(char * str, uint32_t id) {
+id_to_hex(char * str, uint32_t id) { //10进制转16进制
 	int i;
 	static char hex[16] = { '0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F' };
 	str[0] = ':';
@@ -113,7 +113,7 @@ struct drop_t {
 };
 
 static void
-drop_message(struct skynet_message *msg, void *ud) {
+drop_message(struct skynet_message *msg, void *ud) {//A向B发送消息时，当B不存在时，需要向A回复PTYPE_ERROR消息
 	struct drop_t *d = ud;
 	skynet_free(msg->data);
 	uint32_t source = d->handle;
@@ -123,21 +123,21 @@ drop_message(struct skynet_message *msg, void *ud) {
 }
 
 struct skynet_context * 
-skynet_context_new(const char * name, const char *param) {
-	struct skynet_module * mod = skynet_module_query(name);
+skynet_context_new(const char * name, const char *param) { //启动一个新服务ctx
+	struct skynet_module * mod = skynet_module_query(name); //从skynet_module获取对应的模板
 
 	if (mod == NULL)
 		return NULL;
 
-	void *inst = skynet_module_instance_create(mod);
+	void *inst = skynet_module_instance_create(mod); //ctx独有的数据块，最终会调用c服务里的xxx_create
 	if (inst == NULL)
 		return NULL;
 	struct skynet_context * ctx = skynet_malloc(sizeof(*ctx));
-	CHECKCALLING_INIT(ctx)
+	CHECKCALLING_INIT(ctx) 
 
 	ctx->mod = mod;
 	ctx->instance = inst;
-	ctx->ref = 2;
+	ctx->ref = 2; //初始化完成会调用skynet_context_release将引用计数-1，ref变成1而不会被释放掉
 	ctx->cb = NULL;
 	ctx->cb_ud = NULL;
 	ctx->session_id = 0;
@@ -152,25 +152,25 @@ skynet_context_new(const char * name, const char *param) {
 	ctx->profile = G_NODE.profile;
 	// Should set to 0 first to avoid skynet_handle_retireall get an uninitialized handle
 	ctx->handle = 0;	
-	ctx->handle = skynet_handle_register(ctx);
-	struct message_queue * queue = ctx->queue = skynet_mq_create(ctx->handle);
+	ctx->handle = skynet_handle_register(ctx); //从skynet_handle获得唯一的标识id
+	struct message_queue * queue = ctx->queue = skynet_mq_create(ctx->handle); //初始化次级消息队列
 	// init function maybe use ctx->handle, so it must init at last
 	context_inc();
 
 	CHECKCALLING_BEGIN(ctx)
-	int r = skynet_module_instance_init(mod, inst, ctx, param);
+	int r = skynet_module_instance_init(mod, inst, ctx, param);//初始化ctx独有的数据块
 	CHECKCALLING_END(ctx)
-	if (r == 0) {
+	if (r == 0) { //初始化成功
 		struct skynet_context * ret = skynet_context_release(ctx);
 		if (ret) {
 			ctx->init = true;
 		}
-		skynet_globalmq_push(queue);
+		skynet_globalmq_push(queue); //push到全局队列中，供工作线程调度
 		if (ret) {
 			skynet_error(ret, "LAUNCH %s %s", name, param ? param : "");
 		}
 		return ret;
-	} else {
+	} else { //初始化失败
 		skynet_error(ctx, "FAILED launch %s", name);
 		uint32_t handle = ctx->handle;
 		skynet_context_release(ctx);
@@ -182,7 +182,7 @@ skynet_context_new(const char * name, const char *param) {
 }
 
 int
-skynet_context_newsession(struct skynet_context *ctx) {
+skynet_context_newsession(struct skynet_context *ctx) { //生成ctx唯一的session id
 	// session always be a positive number
 	int session = ++ctx->session_id;
 	if (session <= 0) {
@@ -193,12 +193,12 @@ skynet_context_newsession(struct skynet_context *ctx) {
 }
 
 void 
-skynet_context_grab(struct skynet_context *ctx) {
+skynet_context_grab(struct skynet_context *ctx) { //ctx引用计数+1
 	ATOM_INC(&ctx->ref);
 }
 
 void
-skynet_context_reserve(struct skynet_context *ctx) {
+skynet_context_reserve(struct skynet_context *ctx) { //skynet_harbor会调用
 	skynet_context_grab(ctx);
 	// don't count the context reserved, because skynet abort (the worker threads terminate) only when the total context is 0 .
 	// the reserved context will be release at last.
@@ -206,7 +206,7 @@ skynet_context_reserve(struct skynet_context *ctx) {
 }
 
 static void 
-delete_context(struct skynet_context *ctx) {
+delete_context(struct skynet_context *ctx) {//删除ctx，释放内存
 	if (ctx->logfile) {
 		fclose(ctx->logfile);
 	}
@@ -218,7 +218,7 @@ delete_context(struct skynet_context *ctx) {
 }
 
 struct skynet_context * 
-skynet_context_release(struct skynet_context *ctx) {
+skynet_context_release(struct skynet_context *ctx) { //ctx引用计数-1
 	if (ATOM_DEC(&ctx->ref) == 0) {
 		delete_context(ctx);
 		return NULL;
@@ -227,7 +227,7 @@ skynet_context_release(struct skynet_context *ctx) {
 }
 
 int
-skynet_context_push(uint32_t handle, struct skynet_message *message) {
+skynet_context_push(uint32_t handle, struct skynet_message *message) { //给handle对应的ctx发送消息，即push到ctx的次级消息队列里
 	struct skynet_context * ctx = skynet_handle_grab(handle);
 	if (ctx == NULL) {
 		return -1;
@@ -239,7 +239,7 @@ skynet_context_push(uint32_t handle, struct skynet_message *message) {
 }
 
 void 
-skynet_context_endless(uint32_t handle) {
+skynet_context_endless(uint32_t handle) {//skynet_monitor监视到消息堵住
 	struct skynet_context * ctx = skynet_handle_grab(handle);
 	if (ctx == NULL) {
 		return;
@@ -249,7 +249,7 @@ skynet_context_endless(uint32_t handle) {
 }
 
 int 
-skynet_isremote(struct skynet_context * ctx, uint32_t handle, int * harbor) {
+skynet_isremote(struct skynet_context * ctx, uint32_t handle, int * harbor) { //handle是远程的ctx？
 	int ret = skynet_harbor_message_isremote(handle);
 	if (harbor) {
 		*harbor = (int)(handle >> HANDLE_REMOTE_SHIFT);
@@ -258,7 +258,7 @@ skynet_isremote(struct skynet_context * ctx, uint32_t handle, int * harbor) {
 }
 
 static void
-dispatch_message(struct skynet_context *ctx, struct skynet_message *msg) {
+dispatch_message(struct skynet_context *ctx, struct skynet_message *msg) { //处理一条ctx消息，即调用ctx的消息回调函数
 	assert(ctx->init);
 	CHECKCALLING_BEGIN(ctx)
 	pthread_setspecific(G_NODE.handle_key, (void *)(uintptr_t)(ctx->handle));
@@ -271,7 +271,7 @@ dispatch_message(struct skynet_context *ctx, struct skynet_message *msg) {
 	int reserve_msg;
 	if (ctx->profile) {
 		ctx->cpu_start = skynet_thread_time();
-		reserve_msg = ctx->cb(ctx, ctx->cb_ud, type, msg->session, msg->source, msg->data, sz);
+		reserve_msg = ctx->cb(ctx, ctx->cb_ud, type, msg->session, msg->source, msg->data, sz);//消息回调函数
 		uint64_t cost_time = skynet_thread_time() - ctx->cpu_start;
 		ctx->cpu_cost += cost_time;
 	} else {
@@ -284,7 +284,7 @@ dispatch_message(struct skynet_context *ctx, struct skynet_message *msg) {
 }
 
 void 
-skynet_context_dispatchall(struct skynet_context * ctx) {
+skynet_context_dispatchall(struct skynet_context * ctx) {//处理ctx所有消息
 	// for skynet_error
 	struct skynet_message msg;
 	struct message_queue *q = ctx->queue;
@@ -294,19 +294,19 @@ skynet_context_dispatchall(struct skynet_context * ctx) {
 }
 
 struct message_queue * 
-skynet_context_message_dispatch(struct skynet_monitor *sm, struct message_queue *q, int weight) {
+skynet_context_message_dispatch(struct skynet_monitor *sm, struct message_queue *q, int weight) {//工作线程分发消息,处理完返回全局队列的下一条次级消息队列，供下一帧调用
 	if (q == NULL) {
-		q = skynet_globalmq_pop();
+		q = skynet_globalmq_pop(); //从全局消息队列里pop一条次级消息队列
 		if (q==NULL)
 			return NULL;
 	}
 
 	uint32_t handle = skynet_mq_handle(q);
 
-	struct skynet_context * ctx = skynet_handle_grab(handle);
-	if (ctx == NULL) {
+	struct skynet_context * ctx = skynet_handle_grab(handle); //获取次级消息队列的ctx
+	if (ctx == NULL) { //ctx不存在了
 		struct drop_t d = { handle };
-		skynet_mq_release(q, drop_message, &d);
+		skynet_mq_release(q, drop_message, &d); //释放次级消息队列
 		return skynet_globalmq_pop();
 	}
 
@@ -314,10 +314,10 @@ skynet_context_message_dispatch(struct skynet_monitor *sm, struct message_queue 
 	struct skynet_message msg;
 
 	for (i=0;i<n;i++) {
-		if (skynet_mq_pop(q,&msg)) {
+		if (skynet_mq_pop(q,&msg)) { //如果ctx的次级消息队列为空，返回
 			skynet_context_release(ctx);
 			return skynet_globalmq_pop();
-		} else if (i==0 && weight >= 0) {
+		} else if (i==0 && weight >= 0) { //weight:-1只处理一条消息，0处理完q中所有消息，>0处理长度右移weight位(1/(2*weight))条消息
 			n = skynet_mq_length(q);
 			n >>= weight;
 		}
@@ -331,7 +331,7 @@ skynet_context_message_dispatch(struct skynet_monitor *sm, struct message_queue 
 		if (ctx->cb == NULL) {
 			skynet_free(msg.data);
 		} else {
-			dispatch_message(ctx, &msg);
+			dispatch_message(ctx, &msg); //处理消息
 		}
 
 		skynet_monitor_trigger(sm, 0,0);
@@ -374,7 +374,7 @@ skynet_queryname(struct skynet_context * context, const char * name) {
 }
 
 static void
-handle_exit(struct skynet_context * context, uint32_t handle) {
+handle_exit(struct skynet_context * context, uint32_t handle) { //ctx exit
 	if (handle == 0) {
 		handle = context->handle;
 		skynet_error(context, "KILL self");
@@ -384,18 +384,18 @@ handle_exit(struct skynet_context * context, uint32_t handle) {
 	if (G_NODE.monitor_exit) {
 		skynet_send(context,  handle, G_NODE.monitor_exit, PTYPE_CLIENT, 0, NULL, 0);
 	}
-	skynet_handle_retire(handle);
+	skynet_handle_retire(handle); //回收handle
 }
 
 // skynet command
 
-struct command_func {
+struct command_func { //skynet指令结构
 	const char *name;
 	const char * (*func)(struct skynet_context * context, const char * param);
 };
 
 static const char *
-cmd_timeout(struct skynet_context * context, const char * param) {
+cmd_timeout(struct skynet_context * context, const char * param) {//定时器
 	char * session_ptr = NULL;
 	int ti = strtol(param, &session_ptr, 10);
 	int session = skynet_context_newsession(context);
@@ -405,7 +405,7 @@ cmd_timeout(struct skynet_context * context, const char * param) {
 }
 
 static const char *
-cmd_reg(struct skynet_context * context, const char * param) {
+cmd_reg(struct skynet_context * context, const char * param) {//给ctx注册名称
 	if (param == NULL || param[0] == '\0') {
 		sprintf(context->result, ":%x", context->handle);
 		return context->result;
@@ -418,7 +418,7 @@ cmd_reg(struct skynet_context * context, const char * param) {
 }
 
 static const char *
-cmd_query(struct skynet_context * context, const char * param) {
+cmd_query(struct skynet_context * context, const char * param) {//查询名字对应的ctx的handle
 	if (param[0] == '.') {
 		uint32_t handle = skynet_handle_findname(param+1);
 		if (handle) {
@@ -430,7 +430,7 @@ cmd_query(struct skynet_context * context, const char * param) {
 }
 
 static const char *
-cmd_name(struct skynet_context * context, const char * param) {
+cmd_name(struct skynet_context * context, const char * param) {//给指定的handle注册名称
 	int size = strlen(param);
 	char name[size+1];
 	char handle[size+1];
@@ -451,7 +451,7 @@ cmd_name(struct skynet_context * context, const char * param) {
 }
 
 static const char *
-cmd_exit(struct skynet_context * context, const char * param) {
+cmd_exit(struct skynet_context * context, const char * param) { //ctx主动退出
 	handle_exit(context, 0);
 	return NULL;
 }
@@ -471,7 +471,7 @@ tohandle(struct skynet_context * context, const char * param) {
 }
 
 static const char *
-cmd_kill(struct skynet_context * context, const char * param) {
+cmd_kill(struct skynet_context * context, const char * param) {//杀掉指定名称的ctx
 	uint32_t handle = tohandle(context, param);
 	if (handle) {
 		handle_exit(context, handle);
@@ -480,7 +480,7 @@ cmd_kill(struct skynet_context * context, const char * param) {
 }
 
 static const char *
-cmd_launch(struct skynet_context * context, const char * param) {
+cmd_launch(struct skynet_context * context, const char * param) {//启动一个新ctx
 	size_t sz = strlen(param);
 	char tmp[sz+1];
 	strcpy(tmp,param);
@@ -497,12 +497,12 @@ cmd_launch(struct skynet_context * context, const char * param) {
 }
 
 static const char *
-cmd_getenv(struct skynet_context * context, const char * param) {
+cmd_getenv(struct skynet_context * context, const char * param) { //获取ctx环境变量
 	return skynet_getenv(param);
 }
 
 static const char *
-cmd_setenv(struct skynet_context * context, const char * param) {
+cmd_setenv(struct skynet_context * context, const char * param) { //设置skynet环境变量，所有ctx共用
 	size_t sz = strlen(param);
 	char key[sz+1];
 	int i;
@@ -520,20 +520,20 @@ cmd_setenv(struct skynet_context * context, const char * param) {
 }
 
 static const char *
-cmd_starttime(struct skynet_context * context, const char * param) {
+cmd_starttime(struct skynet_context * context, const char * param) { //获取ctx启动时间
 	uint32_t sec = skynet_starttime();
 	sprintf(context->result,"%u",sec);
 	return context->result;
 }
 
 static const char *
-cmd_abort(struct skynet_context * context, const char * param) {
+cmd_abort(struct skynet_context * context, const char * param) { //kill掉skynet进程
 	skynet_handle_retireall();
 	return NULL;
 }
 
 static const char *
-cmd_monitor(struct skynet_context * context, const char * param) {
+cmd_monitor(struct skynet_context * context, const char * param) { //监测某个ctx
 	uint32_t handle=0;
 	if (param == NULL || param[0] == '\0') {
 		if (G_NODE.monitor_exit) {
@@ -550,7 +550,7 @@ cmd_monitor(struct skynet_context * context, const char * param) {
 }
 
 static const char *
-cmd_stat(struct skynet_context * context, const char * param) {
+cmd_stat(struct skynet_context * context, const char * param) { //获取ctx的内部状态信息
 	if (strcmp(param, "mqlen") == 0) {
 		int len = skynet_mq_length(context->queue);
 		sprintf(context->result, "%d", len);
@@ -581,7 +581,7 @@ cmd_stat(struct skynet_context * context, const char * param) {
 }
 
 static const char *
-cmd_logon(struct skynet_context * context, const char * param) {
+cmd_logon(struct skynet_context * context, const char * param) { //开启ctx日志记录
 	uint32_t handle = tohandle(context, param);
 	if (handle == 0)
 		return NULL;
@@ -604,7 +604,7 @@ cmd_logon(struct skynet_context * context, const char * param) {
 }
 
 static const char *
-cmd_logoff(struct skynet_context * context, const char * param) {
+cmd_logoff(struct skynet_context * context, const char * param) { //关闭ctx日志记录
 	uint32_t handle = tohandle(context, param);
 	if (handle == 0)
 		return NULL;
@@ -623,7 +623,7 @@ cmd_logoff(struct skynet_context * context, const char * param) {
 }
 
 static const char *
-cmd_signal(struct skynet_context * context, const char * param) {
+cmd_signal(struct skynet_context * context, const char * param) { //给ctx发信号
 	uint32_t handle = tohandle(context, param);
 	if (handle == 0)
 		return NULL;
@@ -636,13 +636,14 @@ cmd_signal(struct skynet_context * context, const char * param) {
 		sig = strtol(param, NULL, 0);
 	}
 	// NOTICE: the signal function should be thread safe.
+    // 最终会调用c服务的xxx_signal函数
 	skynet_module_instance_signal(ctx->mod, ctx->instance, sig);
 
 	skynet_context_release(ctx);
 	return NULL;
 }
 
-static struct command_func cmd_funcs[] = {
+static struct command_func cmd_funcs[] = { //skynet可接收的一系列指令
 	{ "TIMEOUT", cmd_timeout },
 	{ "REG", cmd_reg },
 	{ "QUERY", cmd_query },
@@ -663,7 +664,7 @@ static struct command_func cmd_funcs[] = {
 };
 
 const char * 
-skynet_command(struct skynet_context * context, const char * cmd , const char * param) {
+skynet_command(struct skynet_context * context, const char * cmd , const char * param) {//给skynet发指令
 	struct command_func * method = &cmd_funcs[0];
 	while(method->name) {
 		if (strcmp(cmd, method->name) == 0) {
@@ -675,6 +676,7 @@ skynet_command(struct skynet_context * context, const char * cmd , const char * 
 	return NULL;
 }
 
+// 预处理消息数据块
 static void
 _filter_args(struct skynet_context * context, int type, int *session, void ** data, size_t * sz) {
 	int needcopy = !(type & PTYPE_TAG_DONTCOPY);
@@ -696,6 +698,7 @@ _filter_args(struct skynet_context * context, int type, int *session, void ** da
 	*sz |= (size_t)type << MESSAGE_TYPE_SHIFT;
 }
 
+//发送消息
 int
 skynet_send(struct skynet_context * context, uint32_t source, uint32_t destination , int type, int session, void * data, size_t sz) {
 	if ((sz & MESSAGE_TYPE_MASK) != sz) {
@@ -705,7 +708,7 @@ skynet_send(struct skynet_context * context, uint32_t source, uint32_t destinati
 		}
 		return -1;
 	}
-	_filter_args(context, type, &session, (void **)&data, &sz);
+	_filter_args(context, type, &session, (void **)&data, &sz); //预处理消息数据块
 
 	if (source == 0) {
 		source = context->handle;
@@ -714,7 +717,7 @@ skynet_send(struct skynet_context * context, uint32_t source, uint32_t destinati
 	if (destination == 0) {
 		return session;
 	}
-	if (skynet_harbor_message_isremote(destination)) {
+	if (skynet_harbor_message_isremote(destination)) { //不是同一skynet节点里服务，交给harbor
 		struct remote_message * rmsg = skynet_malloc(sizeof(*rmsg));
 		rmsg->destination.handle = destination;
 		rmsg->message = data;
@@ -727,7 +730,7 @@ skynet_send(struct skynet_context * context, uint32_t source, uint32_t destinati
 		smsg.data = data;
 		smsg.sz = sz;
 
-		if (skynet_context_push(destination, &smsg)) {
+		if (skynet_context_push(destination, &smsg)) { //push给目的ctx
 			skynet_free(data);
 			return -1;
 		}
@@ -735,6 +738,7 @@ skynet_send(struct skynet_context * context, uint32_t source, uint32_t destinati
 	return session;
 }
 
+//通过ctx的名称发送消息
 int
 skynet_sendname(struct skynet_context * context, uint32_t source, const char * addr , int type, int session, void * data, size_t sz) {
 	if (source == 0) {
@@ -764,7 +768,7 @@ skynet_sendname(struct skynet_context * context, uint32_t source, const char * a
 		return session;
 	}
 
-	return skynet_send(context, source, des, type, session, data, sz);
+	return skynet_send(context, source, des, type, session, data, sz);//通过handle发送
 }
 
 uint32_t 
@@ -773,7 +777,7 @@ skynet_context_handle(struct skynet_context *ctx) {
 }
 
 void 
-skynet_callback(struct skynet_context * context, void *ud, skynet_cb cb) {
+skynet_callback(struct skynet_context * context, void *ud, skynet_cb cb) { //注册ctx的回调函数
 	context->cb = cb;
 	context->cb_ud = ud;
 }

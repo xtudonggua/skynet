@@ -15,14 +15,14 @@
 struct modules {
 	int count;
 	struct spinlock lock;
-	const char * path;
-	struct skynet_module m[MAX_MODULE_TYPE];
+	const char * path;// 用c编写的服务编译后so库路经，不配置默认是./cservice/?.so
+	struct skynet_module m[MAX_MODULE_TYPE]; //存放服务模块的数组
 };
 
 static struct modules * M = NULL;
 
 static void *
-_try_open(struct modules *m, const char * name) {
+_try_open(struct modules *m, const char * name) {//用dlopen获取名称为name的so库句柄
 	const char *l;
 	const char * path = m->path;
 	size_t path_size = strlen(path);
@@ -31,7 +31,9 @@ _try_open(struct modules *m, const char * name) {
 	int sz = path_size + name_size;
 	//search path
 	void * dl = NULL;
-	char tmp[sz];
+	char tmp[sz]; //tmp完整的文件路经
+    // 配置的path格式通常是"./xxx/?.so;./yyy/zzz/?.so"
+    // 如果name是“aaa”，需查找./xxx/aaa.so  ./yyy/zzz/aaa.so
 	do
 	{
 		memset(tmp,0,sz);
@@ -51,7 +53,7 @@ _try_open(struct modules *m, const char * name) {
 			fprintf(stderr,"Invalid C service path\n");
 			exit(1);
 		}
-		dl = dlopen(tmp, RTLD_NOW | RTLD_GLOBAL);
+		dl = dlopen(tmp, RTLD_NOW | RTLD_GLOBAL); //用dlopen获取so库的dl句柄
 		path = l;
 	}while(dl == NULL);
 
@@ -73,6 +75,7 @@ _query(const char * name) {
 	return NULL;
 }
 
+//so库create,init,release,signal命名遵循xxx_create,xxx_init,xxx_release,xxx_signal
 static void *
 get_api(struct skynet_module *mod, const char *api_name) {
 	size_t name_size = strlen(mod->name);
@@ -86,9 +89,10 @@ get_api(struct skynet_module *mod, const char *api_name) {
 	} else {
 		ptr = ptr + 1;
 	}
-	return dlsym(mod->module, ptr);
+	return dlsym(mod->module, ptr);//通过dlsym获取dl句柄的接口
 }
 
+//mod里4个函数指针绑定so库中对应的接口，之后调用mod里函数指针即调用so库里对应的函数
 static int
 open_sym(struct skynet_module *mod) {
 	mod->create = get_api(mod, "_create");
@@ -100,8 +104,8 @@ open_sym(struct skynet_module *mod) {
 }
 
 struct skynet_module * 
-skynet_module_query(const char * name) {
-	struct skynet_module * result = _query(name);
+skynet_module_query(const char * name) { //通过name查找对应的module
+	struct skynet_module * result = _query(name); //之前有创建相同名称的服务直接返回
 	if (result)
 		return result;
 
@@ -109,6 +113,7 @@ skynet_module_query(const char * name) {
 
 	result = _query(name); // double check
 
+    //没找到，通过dlopen，dlsym获取，然后保存到modules里
 	if (result == NULL && M->count < MAX_MODULE_TYPE) {
 		int index = M->count;
 		void * dl = _try_open(M,name);
@@ -145,7 +150,7 @@ skynet_module_insert(struct skynet_module *mod) {
 void * 
 skynet_module_instance_create(struct skynet_module *m) {
 	if (m->create) {
-		return m->create();
+		return m->create(); //即调用m->module的so库的xxx_create函数
 	} else {
 		return (void *)(intptr_t)(~0);
 	}
@@ -153,25 +158,25 @@ skynet_module_instance_create(struct skynet_module *m) {
 
 int
 skynet_module_instance_init(struct skynet_module *m, void * inst, struct skynet_context *ctx, const char * parm) {
-	return m->init(inst, ctx, parm);
+	return m->init(inst, ctx, parm); //即调用m->module的so库的xxx_init函数
 }
 
 void 
 skynet_module_instance_release(struct skynet_module *m, void *inst) {
-	if (m->release) {
+	if (m->release) { //即调用m->module的so库的xxx_release函数
 		m->release(inst);
 	}
 }
 
 void
 skynet_module_instance_signal(struct skynet_module *m, void *inst, int signal) {
-	if (m->signal) {
+	if (m->signal) { //即调用m->module的so库的xxx_signal函数
 		m->signal(inst, signal);
 	}
 }
 
 void 
-skynet_module_init(const char *path) {
+skynet_module_init(const char *path) { //初始化,path是配置文件的cpath路经
 	struct modules *m = skynet_malloc(sizeof(*m));
 	m->count = 0;
 	m->path = skynet_strdup(path);

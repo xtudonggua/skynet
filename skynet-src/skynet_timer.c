@@ -22,9 +22,9 @@
 typedef void (*timer_execute_func)(void *ud,void *arg);
 
 #define TIME_NEAR_SHIFT 8
-#define TIME_NEAR (1 << TIME_NEAR_SHIFT)
+#define TIME_NEAR (1 << TIME_NEAR_SHIFT) //即将到来的定时器数组大小2^8
 #define TIME_LEVEL_SHIFT 6
-#define TIME_LEVEL (1 << TIME_LEVEL_SHIFT)
+#define TIME_LEVEL (1 << TIME_LEVEL_SHIFT) //较远的定时器数组大小2*6
 #define TIME_NEAR_MASK (TIME_NEAR-1)
 #define TIME_LEVEL_MASK (TIME_LEVEL-1)
 
@@ -33,30 +33,30 @@ struct timer_event {
 	int session;
 };
 
-struct timer_node {
+struct timer_node { //单个定时器节点
 	struct timer_node *next;
-	uint32_t expire;
+	uint32_t expire; //到期滴答数
 };
 
-struct link_list {
+struct link_list { //定时器链表
 	struct timer_node head;
 	struct timer_node *tail;
 };
 
 struct timer {
-	struct link_list near[TIME_NEAR];
-	struct link_list t[4][TIME_LEVEL];
+	struct link_list near[TIME_NEAR]; //即将到来的定时器数组，每个元素是一个链表，同一链表的定时器滴答数相等
+	struct link_list t[4][TIME_LEVEL]; //较远的定时器，分四级，
 	struct spinlock lock;
-	uint32_t time;
-	uint32_t starttime;
-	uint64_t current;
-	uint64_t current_point;
+	uint32_t time; //启动到现在走过的滴答数，等同于current
+	uint32_t starttime; //启动时间
+	uint64_t current; //从启动到现在经历的循环次数(0.0025s循环一次)
+	uint64_t current_point; //当前unix滴答数(1秒=100滴答)
 };
 
 static struct timer * TI = NULL;
 
 static inline struct timer_node *
-link_clear(struct link_list *list) {
+link_clear(struct link_list *list) { //清空一个链表
 	struct timer_node * ret = list->head.next;
 	list->head.next = 0;
 	list->tail = &(list->head);
@@ -65,7 +65,7 @@ link_clear(struct link_list *list) {
 }
 
 static inline void
-link(struct link_list *list,struct timer_node *node) {
+link(struct link_list *list,struct timer_node *node) { //往链表里加入一个节点
 	list->tail->next = node;
 	list->tail = node;
 	node->next=0;

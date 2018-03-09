@@ -1111,6 +1111,7 @@ forward_message_tcp(struct socket_server *ss, struct socket *s, struct socket_lo
 	int sz = s->p.size;
 	char * buffer = MALLOC(sz);
 	int n = (int)read(s->fd, buffer, sz);
+    printf("n= %d\n", n);
 	if (n<0) {
 		FREE(buffer);
 		switch(errno) {
@@ -1149,6 +1150,8 @@ forward_message_tcp(struct socket_server *ss, struct socket *s, struct socket_lo
 	result->id = s->id;
 	result->ud = n;
 	result->data = buffer;
+    printf("forward_message_tcp %lld,%d,%d,%s\n",
+            s->opaque, s->id, n, buffer);
 	return SOCKET_DATA;
 }
 
@@ -1347,11 +1350,14 @@ socket_server_poll(struct socket_server *ss, struct socket_message * result, int
 		}
 		struct socket_lock l;
 		socket_lock_init(s, &l);
+        printf("XXXX  %d, %d, %d\n", s->id, s->fd, s->type);
 		switch (s->type) {
 		case SOCKET_TYPE_CONNECTING:
+            printf("111111111111\n");
 			return report_connect(ss, s, &l, result);
 		case SOCKET_TYPE_LISTEN: {
 			int ok = report_accept(ss, s, result);
+            printf("2222222222 ok = %d\n", ok);
 			if (ok > 0) {
 				return SOCKET_ACCEPT;
 			} if (ok < 0 ) {
@@ -1361,9 +1367,11 @@ socket_server_poll(struct socket_server *ss, struct socket_message * result, int
 			break;
 		}
 		case SOCKET_TYPE_INVALID:
+            printf("3333333333\n");
 			fprintf(stderr, "socket-server: invalid socket\n");
 			break;
 		default:
+            printf("444444444   %d,%d\n", e->read, e->write);
 			if (e->read) {
 				int type;
 				if (s->protocol == PROTOCOL_TCP) {
